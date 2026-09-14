@@ -1,0 +1,53 @@
+:root {
+  /* Color Palette - Premium Dark Theme */
+  --bg-dark: #070a12;
+  --bg-card: rgba(17, 24, 39, 0.75);
+  --bg-card-solid: #111827;
+  --bg-input: rgba(15, 23, 42, 0.65);
+  --bg-input-focus: rgba(15, 23, 42, 0.9);
+  
+  /* Brand Gradients & Accents */
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --primary-light: #818cf8;
+  --accent-cyan: #06b6d4;
+  --accent-pink: #ec4899;
+  
+  --gradient-primary: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+  --gradient-btn: linear-gradient(135deg, #6366f1 0%, #7c3aed 100%);
+  --gradient-btn-hover: linear-gradient(135deg, #4f46e5 0%, #6d28d9 100%);
+  --gradient-border: linear-gradient(135deg, rgba(255, 255, 255, 0.15), rgba(99, 102, 241, 0.3), rgba(255, 255, 255, 0.05));
+  --gradient-glow: radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.25) 0%, transparent 70%);
+
+  /* Typography Colors */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-placeholder: #475569;
+
+  /* Status Colors */
+  --color-error: #f43f5e;
+  --color-error-bg: rgba(244, 63, 94, 0.12);
+  --color-error-border: rgba(244, 63, 94, 0.35);
+  --color-success: #10b981;
+  --color-success-bg: rgba(16, 185, 129, 0.12);
+  --color-success-border: rgba(16, 185, 129, 0.35);
+
+  /* Borders & Shadows */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-focus: rgba(99, 102, 241, 0.6);
+  --shadow-card: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-input-focus: 0 0 0 3px rgba(99, 102, 241, 0.25), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-btn: 0 10px 25px -5px rgba(99, 102, 241, 0.45);
+
+  /* Typography */
+  --font-main: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  
+  /* Radii & Timing */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --transition-fast: 0.18s ease;
+  --transition-normal: 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
