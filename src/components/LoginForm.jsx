@@ -3,7 +3,7 @@ import { validateEmail, validatePassword } from '../utils/validation';
 import { loginUser, getCurrentSession, AUTH_CONFIG } from '../services/authService';
 import AlertBanner from './AlertBanner';
 
-export default function LoginForm() {
+export default function LoginForm({ onLoginSuccess, onExploreProfiles }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
@@ -104,6 +104,11 @@ export default function LoginForm() {
           type: 'success',
           message: result.message || 'Login successful! Welcome back.'
         });
+        if (onLoginSuccess) {
+          setTimeout(() => {
+            onLoginSuccess(result.user);
+          }, 650);
+        }
       } else {
         setIsLoading(false);
         setIsSuccess(false);
@@ -113,7 +118,7 @@ export default function LoginForm() {
         });
         triggerShake();
       }
-    } catch (err) {
+    } catch (_err) {
       setIsLoading(false);
       setAlert({
         type: 'error',
@@ -322,8 +327,8 @@ export default function LoginForm() {
         </footer>
       </div>
 
-      {/* Demo Credentials Chip */}
-      <div className="demo-badge-container">
+      {/* Demo Credentials Chip & Direct Profile Link */}
+      <div className="demo-badge-container" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', alignItems: 'center' }}>
         <button 
           type="button" 
           className="demo-chip" 
@@ -334,6 +339,18 @@ export default function LoginForm() {
           <span>⚡ Autofill Demo:</span>
           <code>alex@socialconnect.com</code> / <code>Password123!</code>
         </button>
+
+        {onExploreProfiles && (
+          <button
+            type="button"
+            className="btn-profile btn-profile-primary"
+            id="explore-profile-btn"
+            style={{ fontSize: '0.82rem', padding: '0.5rem 1.25rem', borderRadius: '20px' }}
+            onClick={onExploreProfiles}
+          >
+            📸 View Instagram-Style Profile →
+          </button>
+        )}
       </div>
     </div>
   );

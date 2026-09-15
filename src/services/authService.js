@@ -109,8 +109,15 @@ export function getCurrentSession() {
   let user = null;
   try {
     user = userRaw ? JSON.parse(userRaw) : null;
-  } catch (e) {
+  } catch (_e) {
     user = null;
   }
   return { token, user, isAuthenticated: Boolean(token) };
+}
+
+export function logoutUser() {
+  localStorage.removeItem('sc_auth_token');
+  localStorage.removeItem('sc_user');
+  sessionStorage.removeItem('sc_auth_token');
+  sessionStorage.removeItem('sc_user');
 }
