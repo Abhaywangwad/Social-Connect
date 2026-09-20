@@ -1,23 +1,18 @@
 {
   "name": "social-connect",
+  "version": "1.0.0",
+  "description": "Full-stack social media application (MERN)",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "client": "npm run dev --prefix client",
+    "server": "npm run dev --prefix server",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "install:all": "npm install && npm install --prefix client && npm install --prefix server",
+    "reconcile:counters": "node scripts/reconcile-counters.js",
+    "verify:e2e": "node scripts/verify-e2e.js"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7",
-    "@vitejs/plugin-react": "^6.1.1",
-    "oxlint": "^1.81.0",
-    "vite": "^8.3.0"
+    "concurrently": "^9.1.2"
   }
 }

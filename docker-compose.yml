@@ -1,0 +1,60 @@
+services:
+  # ============================================================================
+  # MongoDB Database Service
+  # ============================================================================
+  mongo:
+    image: mongo:7.0
+    container_name: social-connect-mongo
+    restart: unless-stopped
+    ports:
+      # Exposed for local host development and database GUI tools (e.g. Compass)
+      - "27017:27017"
+    volumes:
+      # Persistent volume ensures database survives container restarts
+      - mongo_data:/data/db
+    networks:
+      - social-connect-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # Express & Socket.IO Backend Service
+  # ============================================================================
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: social-connect-backend
+    restart: unless-stopped
+    ports:
+      # HTTP API, Swagger Docs (/api/docs), and Socket.IO
+      - "5000:5000"
+    environment:
+      - NODE_ENV=development
+      - PORT=5000
+      # Uses internal service hostname 'mongo' rather than host 'localhost'
+      - MONGODB_URI=mongodb://mongo:27017/social-connect
+      - CLIENT_URL=http://localhost:5173
+      - JWT_ACCESS_SECRET=dev_access_secret_key_at_least_32_characters_long
+      - JWT_REFRESH_SECRET=dev_refresh_secret_key_at_least_32_characters_long
+      - JWT_SECRET=dev_fallback_secret_key_for_testing
+      - EMAIL_PROVIDER=mock
+      - ENABLE_API_DOCS=true
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - social-connect-net
+
+volumes:
+  mongo_data:
+    name: social_connect_mongo_data
+
+networks:
+  social-connect-net:
+    name: social_connect_network
+    driver: bridge

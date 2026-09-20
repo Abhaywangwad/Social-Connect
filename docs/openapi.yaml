@@ -1,0 +1,2105 @@
+openapi: 3.0.3
+info:
+  title: Social Connect API
+  version: 1.0.0
+  description: |
+    Production REST API specification for **Social Connect**, an Instagram-inspired full-stack social media application built with the MERN stack.
+    
+    ### Key Architecture & Security Features:
+    - **Dual Token Authentication**: Short-lived JWT Access Tokens (`Authorization: Bearer <token>`) combined with rotated, HttpOnly Refresh Tokens (`refreshToken` cookie).
+    - **Session Invalidation & Replay Detection**: Refresh tokens are family-tracked with automatic revocation of all sessions upon reuse attack detection.
+    - **Bilateral Interaction Protections**: Immediate blocking enforcement across feeds, user search, direct messaging, comments, and stories.
+    - **Content Moderation State Machine**: Multi-stage reporting queue and non-destructive moderation statuses (`ACTIVE`, `HIDDEN`, `REMOVED`).
+    - **Deterministic Cursor-Based Pagination**: Stable chronological feed pagination utilizing compound `(createdAt, _id)` database indexes without offset drift.
+    - **Immutable Audit Logging**: Compliance-grade, non-repudiable audit logs tracking authentication, administrative interventions, and security anomalies.
+servers:
+  - url: http://localhost:5000/api
+    description: Local Development Server
+
+tags:
+  - name: Health
+    description: Service health and database readiness probes
+  - name: Authentication & Sessions
+    description: User registration, credentials, token refresh, sessions, and account recovery
+  - name: Users & Profiles
+    description: User profile inspection, search, and profile updates
+  - name: Follows & Social Graph
+    description: Following, unfollowing, and relationship graph discovery
+  - name: Blocks
+    description: Bilateral user blocking and block status queries
+  - name: Posts
+    description: Media publishing, updating, deletion, and post details
+  - name: Likes
+    description: Atomic liking and unliking of posts
+  - name: Saves
+    description: Private post bookmarking and saved collection retrieval
+  - name: Comments & Replies
+    description: Top-level post comments and single-tier threaded replies
+  - name: Home Feed
+    description: Optimized fan-out-on-read chronological home feed
+  - name: Notifications
+    description: Structured social activity alerts and read state tracking
+  - name: Stories
+    description: Ephemeral 24-hour media stories
+  - name: Conversations & Messages
+    description: 1-on-1 direct messaging, conversation metadata, and message history
+  - name: Reports
+    description: User-submitted content and behavior violation reports
+  - name: Admin & Moderation
+    description: Administrative moderation queue, content visibility controls, and account suspensions
+  - name: Admin Audit Logs
+    description: Administrator-only immutable audit trail and security event forensics
+
+paths:
+  # ─── HEALTH ─────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Health]
+      summary: Liveness health check
+      description: Returns lightweight 200 OK to confirm the HTTP server is responsive.
+      responses:
+        '200':
+          description: Server is live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                message: Server is healthy and running
+                data:
+                  status: healthy
+                  uptime: 142.5
+                  timestamp: '2026-09-20T12:00:00.000Z'
+
+  /health/ready:
+    get:
+      operationId: getHealthReady
+      tags: [Health]
+      summary: Readiness probe
+      description: Confirms that downstream database connections (MongoDB) are operational.
+      responses:
+        '200':
+          description: Database connected and ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                message: Server is ready to handle traffic
+                data:
+                  database: connected
+        '503':
+          description: Database disconnected or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ─── AUTHENTICATION & SESSIONS ──────────────────────────────────────────────
+  /auth/register:
+    post:
+      operationId: registerUser
+      tags: [Authentication & Sessions]
+      summary: Register new user account
+      description: Creates a new user profile with hashed password and dispatches an email verification token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+        '409':
+          $ref: '#/components/responses/409Conflict'
+
+  /auth/login:
+    post:
+      operationId: loginUser
+      tags: [Authentication & Sessions]
+      summary: Authenticate user credentials
+      description: Verifies email/password, issues a short-lived Access Token in response body, and sets a secure HttpOnly Refresh Token cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: refreshToken=abc123xyz...; Path=/api/auth; HttpOnly; SameSite=Lax
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          $ref: '#/components/responses/401Unauthorized'
+        '403':
+          description: Account suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [Authentication & Sessions]
+      summary: Rotate and refresh access token
+      description: Presents the HttpOnly refresh token cookie (or x-refresh-token header). Issues a new access token and rotates the refresh token. Detects replay attacks and revokes the session family if reused.
+      parameters:
+        - in: header
+          name: x-refresh-token
+          required: false
+          schema:
+            type: string
+          description: Alternative header if client cannot set cookies
+      responses:
+        '200':
+          description: Token rotated and refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          $ref: '#/components/responses/401Unauthorized'
+
+  /auth/logout:
+    post:
+      operationId: logoutUser
+      tags: [Authentication & Sessions]
+      summary: Logout current session
+      security:
+        - bearerAuth: []
+      description: Explicitly revokes the active session and clears the refresh token cookie.
+      responses:
+        '200':
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          $ref: '#/components/responses/401Unauthorized'
+
+  /auth/logout-all:
+    post:
+      operationId: logoutAllSessions
+      tags: [Authentication & Sessions]
+      summary: Logout from all devices
+      security:
+        - bearerAuth: []
+      description: Revokes all active refresh sessions across all devices for the authenticated user.
+      responses:
+        '200':
+          description: All sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /auth/sessions:
+    get:
+      operationId: getSessions
+      tags: [Authentication & Sessions]
+      summary: List active login sessions
+      security:
+        - bearerAuth: []
+      description: Returns list of active device sessions for the authenticated user with userAgent and IP metadata.
+      responses:
+        '200':
+          description: Active sessions returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /auth/sessions/{sessionId}:
+    delete:
+      operationId: revokeSession
+      tags: [Authentication & Sessions]
+      summary: Revoke specific login session
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionIdParam'
+      responses:
+        '200':
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+
+  /auth/change-password:
+    patch:
+      operationId: changePassword
+      tags: [Authentication & Sessions]
+      summary: Change password
+      security:
+        - bearerAuth: []
+      description: Updates password for authenticated user and revokes all existing sessions except the current one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Password changed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      tags: [Authentication & Sessions]
+      summary: Request password reset email
+      description: Generates a cryptographically secure token and sends a password reset link to user's registered email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: user@example.com
+      responses:
+        '200':
+          description: Reset email dispatched (or generic success to avoid enumeration)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      tags: [Authentication & Sessions]
+      summary: Complete password reset
+      description: Verifies reset token hash, updates password, and revokes all active user sessions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password reset completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+
+  /auth/verify-email:
+    post:
+      operationId: verifyEmail
+      tags: [Authentication & Sessions]
+      summary: Verify email address
+      description: Consumes the email verification token and marks account emailVerified=true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  example: f8d9c2e0b1a2...
+      responses:
+        '200':
+          description: Email verified successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+
+  /auth/resend-verification:
+    post:
+      operationId: resendVerification
+      tags: [Authentication & Sessions]
+      summary: Resend email verification link
+      security:
+        - bearerAuth: []
+      description: Dispatches a new email verification token if the authenticated user's email is unverified.
+      responses:
+        '200':
+          description: Verification email resent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /auth/me:
+    get:
+      operationId: getAuthMe
+      tags: [Authentication & Sessions]
+      summary: Get authenticated identity
+      security:
+        - bearerAuth: []
+      description: Returns safe identity profile of currently authenticated user.
+      responses:
+        '200':
+          description: Current user identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── USERS & PROFILES ───────────────────────────────────────────────────────
+  /users/test:
+    get:
+      operationId: testUserRoute
+      tags: [Users & Profiles]
+      summary: Public connectivity check
+      description: Verifies users route mounting.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/search:
+    get:
+      operationId: searchUsers
+      tags: [Users & Profiles]
+      summary: Search users
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 50
+          description: Search term matching username or fullName
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/me:
+    get:
+      operationId: getMyProfile
+      tags: [Users & Profiles]
+      summary: Get own user profile
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Own profile details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    patch:
+      operationId: updateMyProfile
+      tags: [Users & Profiles]
+      summary: Update own profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+
+  /users/me/blocked:
+    get:
+      operationId: getBlockedUsers
+      tags: [Blocks]
+      summary: List blocked users
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: List of blocked users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}:
+    get:
+      operationId: getUserProfile
+      tags: [Users & Profiles]
+      summary: Get public profile by username
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: User profile found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          description: Blocked by or blocked target user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+
+  /users/{username}/posts:
+    get:
+      operationId: getUserPosts
+      tags: [Posts]
+      summary: Get user profile posts grid
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated posts by user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/block:
+    post:
+      operationId: blockUser
+      tags: [Blocks]
+      summary: Block a user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: User blocked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Cannot block self
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: User already blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      operationId: unblockUser
+      tags: [Blocks]
+      summary: Unblock a user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: User unblocked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/block-status:
+    get:
+      operationId: getBlockStatus
+      tags: [Blocks]
+      summary: Check block status with a user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: Block relationship status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/follow:
+    post:
+      operationId: followUser
+      tags: [Follows & Social Graph]
+      summary: Follow a user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: Successfully followed user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Cannot follow self or blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Already following user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      operationId: unfollowUser
+      tags: [Follows & Social Graph]
+      summary: Unfollow a user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: Successfully unfollowed user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/follow-status:
+    get:
+      operationId: getFollowStatus
+      tags: [Follows & Social Graph]
+      summary: Check follow relationship status
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+      responses:
+        '200':
+          description: Follow status returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/followers:
+    get:
+      operationId: getFollowers
+      tags: [Follows & Social Graph]
+      summary: List followers of a user
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated followers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/{username}/following:
+    get:
+      operationId: getFollowing
+      tags: [Follows & Social Graph]
+      summary: List accounts followed by a user
+      parameters:
+        - $ref: '#/components/parameters/UsernamePathParam'
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated following accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── POSTS ──────────────────────────────────────────────────────────────────
+  /posts:
+    post:
+      operationId: createPost
+      tags: [Posts]
+      summary: Create new post with media
+      security:
+        - bearerAuth: []
+      description: Publishes a new post with multipart/form-data media items (up to 10 images, JPEG/PNG/WebP magic byte validated).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                caption:
+                  type: string
+                  maxLength: 2200
+                  example: 'Golden hour in Tokyo'
+                location:
+                  type: string
+                  maxLength: 100
+                  example: 'Tokyo, Japan'
+                media:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Array of up to 10 authentic image files
+      responses:
+        '201':
+          description: Post published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Validation error or invalid file signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Account suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    get:
+      operationId: getPosts
+      tags: [Posts]
+      summary: Public posts feed
+      parameters:
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: List of active public posts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /posts/{id}:
+    get:
+      operationId: getPostById
+      tags: [Posts]
+      summary: Get post by ID
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/PostIdPathParam'
+      responses:
+        '200':
+          description: Post details with author profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          description: Post not found or moderated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      operationId: updatePost
+      tags: [Posts]
+      summary: Edit own post
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                caption:
+                  type: string
+                  maxLength: 2200
+                location:
+                  type: string
+                  maxLength: 100
+      responses:
+        '200':
+          description: Post updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          description: IDOR protection - only post owner can edit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      operationId: deletePost
+      tags: [Posts]
+      summary: Delete own post
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdPathParam'
+      responses:
+        '200':
+          description: Post deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          description: Only post owner can delete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /posts/{id}/like:
+    post:
+      operationId: togglePostLike
+      tags: [Likes]
+      summary: Toggle like on post
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdPathParam'
+      responses:
+        '200':
+          description: Like toggled (liked or unliked)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /posts/{postId}/save:
+    post:
+      operationId: savePost
+      tags: [Saves]
+      summary: Save a post to private bookmarks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '200':
+          description: Post saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    delete:
+      operationId: unsavePost
+      tags: [Saves]
+      summary: Remove post from private bookmarks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '200':
+          description: Post unsaved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /posts/{postId}/save-status:
+    get:
+      operationId: getSaveStatus
+      tags: [Saves]
+      summary: Check if post is bookmarked by current user
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      responses:
+        '200':
+          description: Save status returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /users/me/saved-posts:
+    get:
+      operationId: getSavedPosts
+      tags: [Saves]
+      summary: List user's saved posts
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated saved posts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── COMMENTS & REPLIES ─────────────────────────────────────────────────────
+  /posts/{postId}/comments:
+    post:
+      operationId: createComment
+      tags: [Comments & Replies]
+      summary: Create top-level comment on post
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 1000
+                  example: 'Incredible shot!'
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    get:
+      operationId: getComments
+      tags: [Comments & Replies]
+      summary: List paginated top-level comments on a post
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated comments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /comments/{commentId}/replies:
+    post:
+      operationId: createReply
+      tags: [Comments & Replies]
+      summary: Reply to a top-level comment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CommentIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 1000
+                  example: 'Thanks for the feedback!'
+      responses:
+        '201':
+          description: Reply created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    get:
+      operationId: getReplies
+      tags: [Comments & Replies]
+      summary: List replies to a comment
+      parameters:
+        - $ref: '#/components/parameters/CommentIdPathParam'
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated replies
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /comments/{commentId}:
+    patch:
+      operationId: updateComment
+      tags: [Comments & Replies]
+      summary: Edit own comment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CommentIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Comment updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    delete:
+      operationId: deleteComment
+      tags: [Comments & Replies]
+      summary: Delete comment
+      security:
+        - bearerAuth: []
+      description: Authorized for either the comment author OR the post owner.
+      parameters:
+        - $ref: '#/components/parameters/CommentIdPathParam'
+      responses:
+        '200':
+          description: Comment deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── HOME FEED ──────────────────────────────────────────────────────────────
+  /feed:
+    get:
+      operationId: getFeed
+      tags: [Home Feed]
+      summary: Authenticated user home feed
+      security:
+        - bearerAuth: []
+      description: Returns newest-first posts from followed accounts and self using deterministic compound cursor pagination (createdAt + _id). Filters out blocked and non-ACTIVE content.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+          description: Number of posts to return per page
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]+$'
+          description: Base64url encoded cursor from previous page
+      responses:
+        '200':
+          description: Feed page with posts and pagination metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+
+  # ─── NOTIFICATIONS ──────────────────────────────────────────────────────────
+  /notifications:
+    get:
+      operationId: getNotifications
+      tags: [Notifications]
+      summary: List user notifications
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Notifications list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /notifications/unread-count:
+    get:
+      operationId: getUnreadNotificationCount
+      tags: [Notifications]
+      summary: Get unread notifications count
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /notifications/read-all:
+    patch:
+      operationId: markAllNotificationsRead
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: All notifications marked read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /notifications/{notificationId}/read:
+    patch:
+      operationId: markNotificationRead
+      tags: [Notifications]
+      summary: Mark single notification as read
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Notification marked read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── STORIES ────────────────────────────────────────────────────────────────
+  /stories:
+    post:
+      operationId: createStory
+      tags: [Stories]
+      summary: Publish an ephemeral story
+      security:
+        - bearerAuth: []
+      description: Uploads a single media image with an automated 24-hour TTL expiration.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [media]
+              properties:
+                media:
+                  type: string
+                  format: binary
+                caption:
+                  type: string
+                  maxLength: 500
+      responses:
+        '201':
+          description: Story published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    get:
+      operationId: getStories
+      tags: [Stories]
+      summary: List active stories from followed users and self
+      security:
+        - bearerAuth: []
+      description: Returns active, non-expired stories grouped by author.
+      responses:
+        '200':
+          description: Active stories list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /stories/{storyId}:
+    get:
+      operationId: getStoryById
+      tags: [Stories]
+      summary: Get story detail by ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: storyId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Story found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          description: Story not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      operationId: deleteStory
+      tags: [Stories]
+      summary: Delete own story
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: storyId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Story deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── CONVERSATIONS & DIRECT MESSAGES ────────────────────────────────────────
+  /conversations:
+    post:
+      operationId: createConversation
+      tags: [Conversations & Messages]
+      summary: Start or find direct conversation
+      security:
+        - bearerAuth: []
+      description: Initiates a 1-to-1 direct conversation with a recipient user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipientId]
+              properties:
+                recipientId:
+                  type: string
+                  pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Existing or newly created conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    get:
+      operationId: getConversations
+      tags: [Conversations & Messages]
+      summary: List user's conversations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated conversations list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /conversations/{conversationId}:
+    get:
+      operationId: getConversationById
+      tags: [Conversations & Messages]
+      summary: Get conversation detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdParam'
+      responses:
+        '200':
+          description: Conversation detail with participants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          description: Not a participant in this conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /conversations/{conversationId}/read:
+    patch:
+      operationId: markConversationRead
+      tags: [Conversations & Messages]
+      summary: Mark conversation messages as read
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdParam'
+      responses:
+        '200':
+          description: Marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /conversations/{conversationId}/messages:
+    post:
+      operationId: sendMessage
+      tags: [Conversations & Messages]
+      summary: Send message via REST
+      security:
+        - bearerAuth: []
+      description: Persists a message to MongoDB and broadcasts real-time message:new to participants.
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 5000
+                  example: 'Hey, are you free this weekend?'
+                clientMessageId:
+                  type: string
+                  example: 'client-temp-uuid-123'
+      responses:
+        '201':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+    get:
+      operationId: getConversationMessages
+      tags: [Conversations & Messages]
+      summary: List messages in conversation
+      security:
+        - bearerAuth: []
+      description: Returns paginated messages using reverse-chronological cursor pagination.
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdParam'
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]+$'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Paginated messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── REPORTS ────────────────────────────────────────────────────────────────
+  /reports:
+    post:
+      operationId: createReport
+      tags: [Reports]
+      summary: Submit moderation report
+      security:
+        - bearerAuth: []
+      description: Submits a confidential report flagging a user, post, comment, or story for review.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReportRequest'
+      responses:
+        '201':
+          description: Report submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  # ─── ADMIN & MODERATION ─────────────────────────────────────────────────────
+  /admin/reports:
+    get:
+      operationId: listAdminReports
+      tags: [Admin & Moderation]
+      summary: List moderation queue reports
+      security:
+        - bearerAuth: []
+      description: Admin-only queue of submitted reports with optional status and targetType filters.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [OPEN, REVIEWING, RESOLVED, DISMISSED]
+        - name: targetType
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [USER, POST, COMMENT, STORY]
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Report list returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/reports/{reportId}:
+    get:
+      operationId: getAdminReportById
+      tags: [Admin & Moderation]
+      summary: Get detailed report with target entity
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Report detail with resolved target entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/reports/{reportId}/status:
+    patch:
+      operationId: updateAdminReportStatus
+      tags: [Admin & Moderation]
+      summary: Transition report status
+      security:
+        - bearerAuth: []
+      description: Enforces state machine transitions (OPEN -> REVIEWING -> RESOLVED/DISMISSED). Terminal states cannot be reopened.
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [REVIEWING, RESOLVED, DISMISSED]
+                moderationNote:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Report status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Invalid transition from terminal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      tags: [Admin & Moderation]
+      summary: Search and list users for moderation
+      security:
+        - bearerAuth: []
+      description: Returns user list including email, accountStatus, and role.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: accountStatus
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ACTIVE, SUSPENDED]
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [USER, ADMIN]
+        - $ref: '#/components/parameters/PageQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Paginated users list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/users/{userId}/status:
+    patch:
+      operationId: updateAdminUserStatus
+      tags: [Admin & Moderation]
+      summary: Suspend or reactivate user account
+      security:
+        - bearerAuth: []
+      description: Toggles accountStatus between ACTIVE and SUSPENDED. Suspending immediately revokes active sessions and disconnects sockets.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, SUSPENDED]
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: User status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Cannot suspend self or another admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/posts/{postId}/moderation:
+    patch:
+      operationId: moderatePost
+      tags: [Admin & Moderation]
+      summary: Moderate post visibility
+      security:
+        - bearerAuth: []
+      description: Non-destructively alters post moderationStatus to ACTIVE, HIDDEN, or REMOVED.
+      parameters:
+        - $ref: '#/components/parameters/PostIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerateContentRequest'
+      responses:
+        '200':
+          description: Post moderation applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/comments/{commentId}/moderation:
+    patch:
+      operationId: moderateComment
+      tags: [Admin & Moderation]
+      summary: Moderate comment visibility
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CommentIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerateContentRequest'
+      responses:
+        '200':
+          description: Comment moderation applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/stories/{storyId}/moderation:
+    patch:
+      operationId: moderateStory
+      tags: [Admin & Moderation]
+      summary: Moderate story visibility
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: storyId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerateContentRequest'
+      responses:
+        '200':
+          description: Story moderation applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  # ─── ADMIN AUDIT LOGS ───────────────────────────────────────────────────────
+  /admin/audit-logs:
+    get:
+      operationId: listAdminAuditLogs
+      tags: [Admin Audit Logs]
+      summary: Query immutable audit logs
+      security:
+        - bearerAuth: []
+      description: Paginated administrative queries across security events and actions with compound index acceleration.
+      parameters:
+        - name: actorId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: targetType
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [USER, POST, COMMENT, STORY, REPORT, SESSION, SYSTEM]
+        - name: targetId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/PageQueryParam'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Paginated audit logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/audit-logs/{auditLogId}:
+    get:
+      operationId: getAdminAuditLogById
+      tags: [Admin Audit Logs]
+      summary: Get single audit log detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: auditLogId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{24}$'
+      responses:
+        '200':
+          description: Audit log detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/404NotFound'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+  /admin/audit-logs/users/{userId}/summary:
+    get:
+      operationId: getAdminUserAuditSummary
+      tags: [Admin Audit Logs]
+      summary: User activity aggregate metrics
+      security:
+        - bearerAuth: []
+      description: Computes aggregate action breakdown and timeline boundaries for an investigated user.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPathParam'
+      responses:
+        '200':
+          description: Aggregated user activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '403':
+          $ref: '#/components/responses/403ForbiddenAdmin'
+
+# ─── REUSABLE COMPONENTS ──────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Standard JWT access token passed in Authorization header
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: refreshToken
+      description: Secure HttpOnly refresh token cookie
+    skipRateLimit:
+      type: apiKey
+      in: header
+      name: x-skip-rate-limit
+      description: Bypasses rate limiting in testing environments
+
+  parameters:
+    PageQueryParam:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: 1-indexed page number
+
+    LimitQueryParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+      description: Items per page
+
+    UsernamePathParam:
+      name: username
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 30
+      description: Target username (case-insensitive)
+
+    PostIdPathParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the post
+
+    PostIdParam:
+      name: postId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the post
+
+    CommentIdPathParam:
+      name: commentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the comment
+
+    ConversationIdParam:
+      name: conversationId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the conversation
+
+    SessionIdParam:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the session
+
+    UserIdPathParam:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+      description: 24-character hexadecimal MongoDB ObjectId of the user
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Operation completed successfully
+        data:
+          type: object
+          nullable: true
+
+    ErrorEnvelope:
+      type: object
+      required: [success, message, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Resource not found
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: NOT_FOUND
+            message:
+              type: string
+              example: Resource not found
+
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 30
+          example: alex_chen
+        email:
+          type: string
+          format: email
+          example: alex@example.com
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: SecretPass123!
+        fullName:
+          type: string
+          maxLength: 60
+          example: Alex Chen
+        bio:
+          type: string
+          maxLength: 150
+          example: Full-stack developer and photographer
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alex@example.com
+        password:
+          type: string
+          example: SecretPass123!
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          example: OldPassword123!
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: NewSecretPass123!
+
+    ResetPasswordRequest:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+          example: f9d8a7b6c5...
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: FreshSecretPass123!
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        fullName:
+          type: string
+          maxLength: 60
+          example: Alex Chen
+        bio:
+          type: string
+          maxLength: 150
+          example: Exploring distributed systems
+        avatar:
+          type: string
+          format: uri
+          example: https://res.cloudinary.com/demo/image/upload/v1/avatar.jpg
+
+    CreateReportRequest:
+      type: object
+      required: [targetType, targetId, reason]
+      properties:
+        targetType:
+          type: string
+          enum: [USER, POST, COMMENT, STORY]
+          example: POST
+        targetId:
+          type: string
+          pattern: '^[0-9a-fA-F]{24}$'
+          example: 6aafa0cc49feee7e447560d1
+        reason:
+          type: string
+          enum: [SPAM, HARASSMENT, SCAM, HATE_SPEECH, INAPPROPRIATE_CONTENT, IMPERSONATION, OTHER]
+          example: SPAM
+        details:
+          type: string
+          maxLength: 1000
+          example: Repeated promotional links
+
+    ModerateContentRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ACTIVE, HIDDEN, REMOVED]
+          example: HIDDEN
+        reason:
+          type: string
+          maxLength: 500
+          example: Violates community guidelines on spam
+
+  responses:
+    400BadRequest:
+      description: Invalid request body, malformed query, or validation failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            message: Validation failed
+            error:
+              code: VALIDATION_ERROR
+              message: Invalid input fields
+
+    401Unauthorized:
+      description: Authentication missing, invalid token, or revoked session
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            message: Authentication required
+            error:
+              code: UNAUTHORIZED
+              message: Missing or invalid token
+
+    403ForbiddenAdmin:
+      description: Administrative permissions required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            message: Administrative privileges required
+            error:
+              code: FORBIDDEN
+              message: User does not have ADMIN role
+
+    404NotFound:
+      description: Target resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            message: Resource not found
+            error:
+              code: NOT_FOUND
+              message: The requested resource does not exist
+
+    409Conflict:
+      description: Resource conflict or unique constraint violation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            message: A user with this email or username already exists
+            error:
+              code: CONFLICT
+              message: Duplicate resource

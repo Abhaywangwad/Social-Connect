@@ -1,0 +1,90 @@
+services:
+  # ============================================================================
+  # MongoDB Production Service (Unexposed to Host Network)
+  # ============================================================================
+  mongo:
+    image: mongo:7.0
+    container_name: social-connect-mongo-prod
+    restart: always
+    # Security: Database port is intentionally NOT exposed to the host network.
+    # Communication is restricted to the internal Docker bridge network.
+    volumes:
+      - mongo_prod_data:/data/db
+    networks:
+      - social-connect-prod-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1024M
+        reservations:
+          memory: 256M
+
+  # ============================================================================
+  # Express & Socket.IO Production Backend Service
+  # ============================================================================
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: social-connect-backend-prod
+    restart: always
+    ports:
+      # Exposes port 5000 to reverse proxy (e.g. Nginx, Traefik, AWS ALB)
+      - "${PORT:-5000}:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017/social-connect}
+      - CLIENT_URL=${CLIENT_URL}
+      - JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME:-}
+      - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY:-}
+      - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET:-}
+      - CLOUDINARY_FOLDER=${CLOUDINARY_FOLDER:-social-connect/posts}
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-smtp}
+      - EMAIL_FROM=${EMAIL_FROM:-no-reply@socialconnect.com}
+      - EMAIL_HOST=${EMAIL_HOST:-}
+      - EMAIL_PORT=${EMAIL_PORT:-587}
+      - EMAIL_USER=${EMAIL_USER:-}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD:-}
+      - ENABLE_API_DOCS=${ENABLE_API_DOCS:-false}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - social-connect-prod-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+
+volumes:
+  mongo_prod_data:
+    name: social_connect_mongo_prod_data
+
+networks:
+  social-connect-prod-net:
+    name: social_connect_prod_network
+    driver: bridge
