@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'bugfix/**'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # Job 1: Backend Automated Tests, Security Audit & Coverage
+  # ============================================================================
+  backend-test:
+    name: Backend Tests & Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies (clean & immutable)
+        run: npm ci
+
+      - name: Run production dependency vulnerability audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run automated test suite with V8 coverage
+        run: npm run test:coverage
+        env:
+          NODE_ENV: test
+          PORT: 5000
+          MONGODB_URI: mongodb://localhost:27017/social-connect-test
+          JWT_SECRET: ci_test_jwt_secret_key_32_characters_minimum
+          JWT_ACCESS_SECRET: ci_test_access_secret_key_32_characters_minimum
+          JWT_REFRESH_SECRET: ci_test_refresh_secret_key_32_characters_minimum
+          EMAIL_PROVIDER: mock
+          CLOUDINARY_CLOUD_NAME: ci_mock_cloud
+          CLOUDINARY_API_KEY: 123456789012345
+          CLOUDINARY_API_SECRET: abcdefghijklmnopqrstuvwxyz12345
+
+      - name: Upload backend coverage report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage-report
+          path: server/coverage/
+          retention-days: 14
+
+  # ============================================================================
+  # Job 2: Frontend Lint & Production Build
+  # ============================================================================
+  frontend-build:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies (clean & immutable)
+        run: npm ci
+
+      - name: Run production dependency vulnerability audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run frontend linter (oxlint)
+        run: npm run lint
+
+      - name: Compile frontend production bundle (Vite)
+        run: npm run build
+
+  # ============================================================================
+  # Job 3: OpenAPI 3.0.3 Contract & Documentation Validation
+  # ============================================================================
+  api-docs-validation:
+    name: OpenAPI & Docs Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Validate OpenAPI spec, operation IDs, and $ref pointers
+        run: npm run validate:docs
+
+  # ============================================================================
+  # Job 4: Production Docker Image Build Validation
+  # ============================================================================
+  docker-build:
+    name: Production Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-build, api-docs-validation]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production backend container image
+        run: docker build -t social-connect-server:ci -f server/Dockerfile server/
