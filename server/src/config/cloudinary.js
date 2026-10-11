@@ -1,29 +1,25 @@
 import { v2 as cloudinary } from 'cloudinary';
-import config from './config.js';
-import ApiError from '../utils/ApiError.js';
 
-/**
- * Configure Cloudinary instance with server-side credentials.
- * Credentials are kept strictly on the backend and never exposed to clients.
- */
 cloudinary.config({
-  cloud_name: config.cloudinary.cloudName,
-  api_key: config.cloudinary.apiKey,
-  api_secret: config.cloudinary.apiSecret,
-  secure: true,
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-/**
- * Validates that essential Cloudinary credentials are configured.
- * Fails clearly if any required environment variable is missing when media operations are performed.
- */
-export const validateCloudinaryConfig = () => {
-  const { cloudName, apiKey, apiSecret } = config.cloudinary;
-  if (!cloudName || !apiKey || !apiSecret) {
-    throw ApiError.internal(
-      'Media storage service is not properly configured. Missing Cloudinary credentials.'
-    );
+// Uploads an image (from multer, kept in memory) to Cloudinary
+// and returns its public URL.
+export const uploadImage = async (file) => {
+  const dataUri = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+
+  try {
+    const result = await cloudinary.uploader.upload(dataUri, { folder: 'social-connect' });
+    return result.secure_url;
+  } catch (err) {
+    // Cloudinary rejects with { error: { message } }, so turn it into a normal Error
+    const reason = err?.error?.message || err?.message || 'unknown error';
+    console.error('Cloudinary upload failed:', reason);
+    const error = new Error('Image upload failed. Check your Cloudinary keys in server/.env');
+    error.status = 502;
+    throw error;
   }
 };
-
-export default cloudinary;

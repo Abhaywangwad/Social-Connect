@@ -1,91 +1,86 @@
-import {
-  getCurrentUserProfile,
-  getUserByUsername,
-  updateCurrentUserProfile,
-} from '../services/userService.js';
-import blockService from '../services/blockService.js';
-import { verifyToken } from '../utils/jwt.js';
-import ApiError from '../utils/ApiError.js';
+import User from '../models/User.js';
+import Post from '../models/Post.js';
+import { uploadImage } from '../config/cloudinary.js';
 
-/**
- * GET /api/users/test
- * Confirms user route is reachable.
- */
-export const testUserRoute = (_req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'User route is connected',
-  });
+// GET /api/users/search?q=abc
+export const searchUsers = async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) {
+    return res.json({ users: [] });
+  }
+
+  // Escape special regex characters so the search text is matched literally
+  const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(safe, 'i');
+
+  const users = await User.find({ $or: [{ username: regex }, { fullName: regex }] })
+    .select('username fullName avatar')
+    .limit(20);
+
+  res.json({ users });
 };
 
-/**
- * GET /api/users/me
- * Retrieves the currently authenticated user's profile.
- * Protected endpoint.
- */
-export const getMyProfile = async (req, res, next) => {
-  try {
-    const user = await getCurrentUserProfile(req.user.userId);
-
-    res.status(200).json({
-      success: true,
-      message: 'Profile fetched successfully',
-      data: {
-        user,
-      },
-    });
-  } catch (error) {
-    next(error);
+// GET /api/users/:username  -> profile info + that user's posts
+export const getProfile = async (req, res) => {
+  const user = await User.findOne({ username: req.params.username.toLowerCase() });
+  if (!user) {
+    return res.status(404).json({ message: 'User not found' });
   }
+
+  const posts = await Post.find({ author: user._id })
+    .sort({ createdAt: -1 })
+    .populate('author', 'username avatar')
+    .populate('comments.user', 'username avatar');
+
+  res.json({ user, posts });
 };
 
-/**
- * GET /api/users/:username
- * Retrieves another user's public profile by username.
- * Public endpoint.
- */
-export const getUserProfile = async (req, res, next) => {
-  try {
-    const user = await getUserByUsername(req.params.username);
+// PUT /api/users/me  -> edit my profile (fullName, bio, optional new avatar)
+export const updateProfile = async (req, res) => {
+  const { fullName, bio } = req.body;
 
-    // If requester is authenticated, ensure neither user has blocked the other
-    if (req.user?.userId) {
-      const targetUserId = user._id || user.id;
-      const isBlocked = await blockService.areUsersBlocked(req.user.userId, targetUserId);
-      if (isBlocked) {
-        throw ApiError.notFound('User not found');
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'User profile fetched successfully',
-      data: {
-        user,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (fullName !== undefined && fullName.length > 50) {
+    return res.status(400).json({ message: 'Name can be at most 50 characters' });
   }
+  if (bio !== undefined && bio.length > 150) {
+    return res.status(400).json({ message: 'Bio can be at most 150 characters' });
+  }
+
+  const user = await User.findById(req.userId);
+  if (fullName !== undefined) user.fullName = fullName.trim();
+  if (bio !== undefined) user.bio = bio.trim();
+  if (req.file) user.avatar = await uploadImage(req.file);
+
+  await user.save();
+  res.json({ user });
 };
 
-/**
- * PATCH /api/users/me
- * Updates the authenticated user's profile fields.
- * Protected endpoint.
- */
-export const updateMyProfile = async (req, res, next) => {
-  try {
-    const user = await updateCurrentUserProfile(req.user.userId, req.body);
+// POST /api/users/:id/follow
+export const followUser = async (req, res) => {
+  const targetId = req.params.id;
 
-    res.status(200).json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: {
-        user,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (targetId === req.userId) {
+    return res.status(400).json({ message: 'You cannot follow yourself' });
   }
+  const target = await User.findById(targetId);
+  if (!target) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  // $addToSet only adds the id if it is not already in the array
+  await User.findByIdAndUpdate(req.userId, { $addToSet: { following: targetId } });
+  await User.findByIdAndUpdate(targetId, { $addToSet: { followers: req.userId } });
+
+  res.json({ message: 'Followed' });
+};
+
+// DELETE /api/users/:id/follow
+export const unfollowUser = async (req, res) => {
+  const targetId = req.params.id;
+
+  // $pull removes the id from the array
+  await User.findByIdAndUpdate(req.userId, { $pull: { following: targetId } });
+  await User.findByIdAndUpdate(targetId, { $pull: { followers: req.userId } });
+
+  res.json({ message: 'Unfollowed' });
 };

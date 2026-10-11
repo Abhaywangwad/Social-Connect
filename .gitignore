@@ -1,49 +1,17 @@
 # Dependencies
 node_modules/
-client/node_modules/
-server/node_modules/
 
-# Environment variables
+# Environment variables (secrets)
 .env
-.env.*
-!.env.example
-server/.env
-server/.env.*
-!server/.env.example
-client/.env
-client/.env.*
-!client/.env.example
 
-# Build & Test output
+# Build output
 client/dist/
-client/build/
-coverage/
-server/coverage/
 
 # Logs
-logs/
 *.log
-npm-debug.log*
 
-# OS files
+# OS / editor files
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# Database Backups & Disaster Recovery Artifacts
-backups/
-server/backups/
-*.dump
-*.archive
-*.archive.gz
-*.gz
-*.tar
-*.sha256
-*.meta.json
-social_connect_backup_*
-
