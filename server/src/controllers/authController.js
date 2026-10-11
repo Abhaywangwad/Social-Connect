@@ -1,385 +1,91 @@
-import authService from '../services/authService.js';
-import sessionService from '../services/sessionService.js';
-import config from '../config/config.js';
-import ApiError from '../utils/ApiError.js';
-import auditService from '../services/auditService.js';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
 
-const REFRESH_COOKIE_NAME = 'refreshToken';
+const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * Cookie options for the HttpOnly refresh token.
- */
-const getRefreshCookieOptions = (maxAgeMs = 30 * 24 * 60 * 60 * 1000) => ({
-  httpOnly: true,
-  secure: config.nodeEnv === 'production',
-  // 'strict' prevents the refresh token cookie from being sent on any
-  // cross-site request (including top-level navigations), providing the
-  // strongest CSRF defence for the /api/auth/refresh endpoint (F-07).
-  sameSite: 'strict',
-  path: '/api/auth',
-  maxAge: maxAgeMs,
-});
+// Creates a JWT for the user and stores it in an HttpOnly cookie.
+// HttpOnly means JavaScript in the browser cannot read it (safer against XSS).
+const setTokenCookie = (res, userId) => {
+  const token = jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-/**
- * Attaches the rotating refresh token to an HttpOnly response cookie.
- */
-const setRefreshTokenCookie = (res, token) => {
-  res.cookie(REFRESH_COOKIE_NAME, token, getRefreshCookieOptions());
-};
-
-/**
- * Clears the refresh token cookie upon logout or password change.
- */
-const clearRefreshTokenCookie = (res) => {
-  res.clearCookie(REFRESH_COOKIE_NAME, {
+  res.cookie('token', token, {
     httpOnly: true,
-    secure: config.nodeEnv === 'production',
-    sameSite: 'strict',
-    path: '/api/auth',
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production', // HTTPS only in production
+    maxAge: SEVEN_DAYS,
   });
 };
 
-/**
- * POST /api/auth/register
- */
-export const register = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-    const user = await authService.registerUser(req.body, context);
+// POST /api/auth/signup
+export const signup = async (req, res) => {
+  const { username, email, password, fullName } = req.body;
 
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully. Please verify your email address.',
-      data: { user },
-    });
-  } catch (error) {
-    next(error);
+  // Simple validation
+  if (!username || !email || !password) {
+    return res.status(400).json({ message: 'Username, email and password are required' });
   }
+  if (!/^[a-zA-Z0-9_.]{3,20}$/.test(username)) {
+    return res.status(400).json({
+      message: 'Username must be 3-20 characters (letters, numbers, _ or .)',
+    });
+  }
+  if (!/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({ message: 'Please enter a valid email' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters' });
+  }
+
+  const existing = await User.findOne({
+    $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }],
+  });
+  if (existing) {
+    return res.status(400).json({ message: 'Username or email is already taken' });
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = await User.create({
+    username,
+    email,
+    password: hashedPassword,
+    fullName: fullName || '',
+  });
+
+  setTokenCookie(res, user._id);
+  res.status(201).json({ user });
 };
 
-/**
- * POST /api/auth/login
- */
-export const login = async (req, res, next) => {
-  try {
-    const { user, accessToken, rawRefreshToken } = await authService.loginUser(
-      req.body,
-      {
-        userAgent: req.headers['user-agent'] || '',
-        ipAddress: req.ip || req.socket?.remoteAddress || '',
-        requestId: req.id,
-      }
-    );
+// POST /api/auth/login
+export const login = async (req, res) => {
+  const { email, password } = req.body;
 
-    // Set HttpOnly refresh cookie (never returned in plaintext JSON)
-    setRefreshTokenCookie(res, rawRefreshToken);
-
-    res.status(200).json({
-      success: true,
-      message: 'Login successful',
-      data: {
-        user,
-        accessToken,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
   }
+
+  const user = await User.findOne({ email: email.toLowerCase() });
+  const passwordOk = user && (await bcrypt.compare(password, user.password));
+
+  if (!passwordOk) {
+    return res.status(400).json({ message: 'Invalid email or password' });
+  }
+
+  setTokenCookie(res, user._id);
+  res.json({ user });
 };
 
-/**
- * POST /api/auth/refresh
- * Reads refresh token from secure HttpOnly cookie (or header fallback for non-browser clients).
- */
-export const refresh = async (req, res, next) => {
-  try {
-    const rawRefreshToken =
-      req.cookies?.[REFRESH_COOKIE_NAME] ||
-      req.headers['x-refresh-token'];
-
-    if (!rawRefreshToken) {
-      throw ApiError.unauthorized('Refresh token is required');
-    }
-
-    const { newRawRefreshToken, accessToken } = await sessionService.refreshSession(
-      rawRefreshToken,
-      {
-        userAgent: req.headers['user-agent'] || '',
-        ipAddress: req.ip || req.socket?.remoteAddress || '',
-        requestId: req.id,
-      }
-    );
-
-    // Set rotated refresh token in secure cookie
-    setRefreshTokenCookie(res, newRawRefreshToken);
-
-    res.status(200).json({
-      success: true,
-      message: 'Access token refreshed successfully',
-      data: {
-        accessToken,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
+// POST /api/auth/logout
+export const logout = (req, res) => {
+  res.clearCookie('token');
+  res.json({ message: 'Logged out' });
 };
 
-/**
- * POST /api/auth/logout
- * Revokes the current authenticated session and clears the refresh cookie.
- */
-export const logout = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-
-    if (req.user?.sessionId) {
-      await sessionService.revokeSession(req.user.sessionId, req.user.userId, {
-        ...context,
-        reason: 'USER_LOGOUT',
-      });
-    }
-
-    await auditService.createAuditLog({
-      actor: req.user.userId,
-      action: 'USER_LOGOUT',
-      targetType: 'SESSION',
-      targetId: req.user.sessionId || null,
-      metadata: { sessionId: req.user.sessionId },
-      ...context,
-    });
-
-    clearRefreshTokenCookie(res);
-
-    res.status(200).json({
-      success: true,
-      message: 'Logged out successfully',
-    });
-  } catch (error) {
-    next(error);
+// GET /api/auth/me  -> who is logged in? (used when the page reloads)
+export const getMe = async (req, res) => {
+  const user = await User.findById(req.userId);
+  if (!user) {
+    return res.status(404).json({ message: 'User not found' });
   }
-};
-
-/**
- * POST /api/auth/logout-all
- * Revokes all active sessions for the current user and clears the refresh cookie.
- */
-export const logoutAll = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-
-    const revokedCount = await sessionService.revokeAllUserSessions(req.user.userId, {
-      ...context,
-      reason: 'USER_LOGOUT_ALL',
-      audit: false,
-    });
-
-    await auditService.createAuditLog({
-      actor: req.user.userId,
-      action: 'USER_LOGOUT_ALL',
-      targetType: 'USER',
-      targetId: req.user.userId,
-      metadata: { numberOfSessionsRevoked: revokedCount },
-      ...context,
-    });
-
-    clearRefreshTokenCookie(res);
-
-    res.status(200).json({
-      success: true,
-      message: 'Successfully logged out from all devices',
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * GET /api/auth/sessions
- * Returns the current user's active sessions (safe projections only).
- */
-export const getSessions = async (req, res, next) => {
-  try {
-    const sessions = await sessionService.getUserActiveSessions(
-      req.user.userId,
-      req.user.sessionId
-    );
-
-    res.status(200).json({
-      success: true,
-      data: { sessions },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * DELETE /api/auth/sessions/:sessionId
- * Revokes one specific session belonging to the current user.
- */
-export const revokeSession = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-      reason: 'USER_REVOKED',
-    };
-
-    await sessionService.revokeSession(req.params.sessionId, req.user.userId, context);
-
-    // If revoking current session, also clear cookie
-    if (req.user.sessionId === req.params.sessionId) {
-      clearRefreshTokenCookie(res);
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Session revoked successfully',
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * PATCH /api/auth/change-password
- */
-export const changePassword = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-    const result = await authService.changePassword(req.user.userId, req.body, context);
-    clearRefreshTokenCookie(res);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * POST /api/auth/forgot-password
- */
-export const forgotPassword = async (req, res, next) => {
-  try {
-    const result = await authService.forgotPassword(req.body?.email);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * POST /api/auth/reset-password
- */
-export const resetPassword = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-    const result = await authService.resetPassword(req.body || {}, context);
-    clearRefreshTokenCookie(res);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * POST /api/auth/verify-email
- */
-export const verifyEmail = async (req, res, next) => {
-  try {
-    const context = {
-      userAgent: req.headers['user-agent'] || '',
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      requestId: req.id,
-    };
-    const result = await authService.verifyEmail(req.body?.token, context);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * POST /api/auth/resend-verification
- */
-export const resendVerification = async (req, res, next) => {
-  try {
-    const result = await authService.resendVerification(req.user.userId);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * GET /api/auth/me
- */
-export const getMe = async (req, res, next) => {
-  try {
-    const user = await authService.getCurrentUser(req.user.userId);
-
-    res.status(200).json({
-      success: true,
-      data: { user },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export default {
-  register,
-  login,
-  refresh,
-  logout,
-  logoutAll,
-  getSessions,
-  revokeSession,
-  changePassword,
-  forgotPassword,
-  resetPassword,
-  verifyEmail,
-  resendVerification,
-  getMe,
+  res.json({ user });
 };

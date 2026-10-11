@@ -1,159 +1,101 @@
-import {
-  createPost,
-  getPostById,
-  getUserPosts,
-  updatePost,
-  deletePost,
-  getAllPosts,
-  toggleLikePost,
-} from '../services/postService.js';
+import Post from '../models/Post.js';
+import User from '../models/User.js';
+import { uploadImage } from '../config/cloudinary.js';
 
-/**
- * POST /api/posts
- * Creates a new post. Protected endpoint.
- */
-export const create = async (req, res, next) => {
-  try {
-    const context = {
-      requestId: req.id,
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      userAgent: req.headers['user-agent'] || '',
-    };
-    const post = await createPost(req.user.userId, req.body, req.files, context);
+// Fills in author / commenter details (instead of just their ids)
+const populatePost = (query) =>
+  query.populate('author', 'username avatar').populate('comments.user', 'username avatar');
 
-    res.status(201).json({
-      success: true,
-      message: 'Post created successfully',
-      data: {
-        post,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
+// GET /api/posts/feed?page=1&limit=10
+// Posts from people I follow + my own posts, newest first.
+export const getFeed = async (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+
+  const me = await User.findById(req.userId);
+  const authors = [...me.following, me._id];
+
+  const posts = await populatePost(
+    Post.find({ author: { $in: authors } })
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+  );
+
+  res.json({ posts, page, hasMore: posts.length === limit });
 };
 
-/**
- * GET /api/posts/:id
- * Retrieves a single post by ID. Public endpoint.
- */
-export const getById = async (req, res, next) => {
-  try {
-    const post = await getPostById(req.params.id, req.user?.userId || null);
+// POST /api/posts  (multipart form: text + optional image)
+export const createPost = async (req, res) => {
+  const text = (req.body.text || '').trim();
 
-    res.status(200).json({
-      success: true,
-      data: {
-        post,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (!text && !req.file) {
+    return res.status(400).json({ message: 'A post needs text or an image' });
   }
+  if (text.length > 2000) {
+    return res.status(400).json({ message: 'Post text can be at most 2000 characters' });
+  }
+
+  let image = '';
+  if (req.file) {
+    image = await uploadImage(req.file);
+  }
+
+  const post = await Post.create({ author: req.userId, text, image });
+  const populated = await populatePost(Post.findById(post._id));
+  res.status(201).json({ post: populated });
 };
 
-/**
- * GET /api/posts
- * Retrieves paginated public feed. Public endpoint.
- */
-export const getAll = async (req, res, next) => {
-  try {
-    const result = await getAllPosts(req.query);
-
-    res.status(200).json({
-      success: true,
-      data: result,
-    });
-  } catch (error) {
-    next(error);
+// DELETE /api/posts/:id  (only the author can delete)
+export const deletePost = async (req, res) => {
+  const post = await Post.findById(req.params.id);
+  if (!post) {
+    return res.status(404).json({ message: 'Post not found' });
   }
+  if (post.author.toString() !== req.userId) {
+    return res.status(403).json({ message: 'You can only delete your own posts' });
+  }
+
+  await post.deleteOne();
+  res.json({ message: 'Post deleted' });
 };
 
-/**
- * GET /api/users/:username/posts
- * Retrieves all posts by a specific user (profile grid). Public endpoint.
- */
-export const getByUser = async (req, res, next) => {
-  try {
-    const result = await getUserPosts(
-      req.params.username,
-      req.query,
-      req.user?.userId || null
-    );
-
-    res.status(200).json({
-      success: true,
-      data: result,
-    });
-  } catch (error) {
-    next(error);
+// PUT /api/posts/:id/like  -> like if not liked yet, otherwise unlike
+export const toggleLike = async (req, res) => {
+  const post = await Post.findById(req.params.id);
+  if (!post) {
+    return res.status(404).json({ message: 'Post not found' });
   }
+
+  const alreadyLiked = post.likes.some((id) => id.toString() === req.userId);
+  if (alreadyLiked) {
+    post.likes = post.likes.filter((id) => id.toString() !== req.userId);
+  } else {
+    post.likes.push(req.userId);
+  }
+
+  await post.save();
+  res.json({ likes: post.likes });
 };
 
-/**
- * PATCH /api/posts/:id
- * Updates caption/location of a post. Protected endpoint (Owner only).
- */
-export const update = async (req, res, next) => {
-  try {
-    const context = {
-      requestId: req.id,
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      userAgent: req.headers['user-agent'] || '',
-    };
-    const post = await updatePost(req.params.id, req.user.userId, req.body, context);
-
-    res.status(200).json({
-      success: true,
-      message: 'Post updated successfully',
-      data: {
-        post,
-      },
-    });
-  } catch (error) {
-    next(error);
+// POST /api/posts/:id/comments  { text }
+export const addComment = async (req, res) => {
+  const text = (req.body.text || '').trim();
+  if (!text) {
+    return res.status(400).json({ message: 'Comment cannot be empty' });
   }
-};
-
-/**
- * DELETE /api/posts/:id
- * Deletes a post. Protected endpoint (Owner only).
- */
-export const remove = async (req, res, next) => {
-  try {
-    const context = {
-      requestId: req.id,
-      ipAddress: req.ip || req.socket?.remoteAddress || '',
-      userAgent: req.headers['user-agent'] || '',
-    };
-    const result = await deletePost(req.params.id, req.user.userId, context);
-
-    res.status(200).json({
-      success: true,
-      message: result.message,
-      data: {
-        postId: result.postId,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (text.length > 500) {
+    return res.status(400).json({ message: 'Comment can be at most 500 characters' });
   }
-};
 
-/**
- * POST /api/posts/:id/like
- * Toggles like on a post. Protected.
- */
-export const toggleLike = async (req, res, next) => {
-  try {
-    const result = await toggleLikePost(req.params.id, req.user.userId);
-
-    res.status(200).json({
-      success: true,
-      message: result.liked ? 'Post liked successfully' : 'Post unliked successfully',
-      data: result,
-    });
-  } catch (error) {
-    next(error);
+  const post = await Post.findById(req.params.id);
+  if (!post) {
+    return res.status(404).json({ message: 'Post not found' });
   }
+
+  post.comments.push({ user: req.userId, text });
+  await post.save();
+
+  const updated = await populatePost(Post.findById(post._id));
+  res.status(201).json({ comments: updated.comments });
 };

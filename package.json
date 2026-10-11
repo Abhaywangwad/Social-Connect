@@ -1,16 +1,13 @@
 {
   "name": "social-connect",
   "version": "1.0.0",
-  "description": "Full-stack social media application (MERN)",
+  "description": "Simple MERN social media app",
   "private": true,
-  "type": "module",
   "scripts": {
-    "client": "npm run dev --prefix client",
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
     "server": "npm run dev --prefix server",
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "install:all": "npm install && npm install --prefix client && npm install --prefix server",
-    "reconcile:counters": "node scripts/reconcile-counters.js",
-    "verify:e2e": "node scripts/verify-e2e.js"
+    "client": "npm run dev --prefix client",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
